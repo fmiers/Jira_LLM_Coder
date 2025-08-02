@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install)",
+      "Bash(forge deploy:*)",
+      "Bash(forge version:*)",
+      "Bash(forge install:*)",
+      "Bash(npm view:*)"
+    ],
+    "deny": []
+  }
+}
