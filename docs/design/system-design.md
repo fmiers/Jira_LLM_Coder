@@ -118,19 +118,42 @@ The Jira LLM Coder is an Atlassian Forge app that integrates Claude AI assistanc
 ## Security Considerations
 
 ### Authentication & Authorization
-- Firebase service account credentials stored in `src/resolvers/firebase-key.json`
-- Jira API access via Forge's built-in authentication
-- User-scoped data access prevents cross-user data leakage
+- **Firebase Admin SDK**: Service account credentials stored in `src/resolvers/firebase-key.json` with admin-level access
+- **Jira API**: Access via Forge's built-in authentication and scoped permissions
+- **User-scoped Access**: Firebase security rules enforce user-specific data isolation
+- **External Claude Processes**: Authenticated via Firebase custom tokens or service accounts
+
+### Firebase Security Rules
+The system implements comprehensive Firebase security rules in two configurations:
+
+#### Production Rules (`firebase-security-rules.json`)
+- **Messages Path** (`/messages/{userId}/{commandId}`):
+  - Read/Write: Only authenticated users matching userId OR admin service accounts
+  - Validation: Enforces required fields (type, payload, timestamp, from)
+  - Type checking: Ensures 'code-request' type and proper data structure
+  - Source validation: Verifies 'from' field equals 'jira-forge-app'
+
+- **Responses Path** (`/responses/{responseKey}`):
+  - Read: Only admin service accounts (Forge app access)
+  - Write: Any authenticated user (allows external Claude processes)
+  - Validation: Enforces required fields (response, messageId, timestamp)
+
+#### Simplified Rules (`firebase-security-rules-simple.json`)
+- Basic authentication requirement for all read/write operations
+- Simplified validation with essential field checking
+- Fallback option for development environments
 
 ### Data Privacy
-- Issue descriptions temporarily stored in Firebase
-- Automatic cleanup after successful processing
-- No persistent storage of Jira content in external systems
+- **Temporary Storage**: Issue descriptions temporarily stored in Firebase with automatic cleanup
+- **No Persistence**: No long-term storage of Jira content in external systems
+- **User Isolation**: Security rules prevent cross-user data access
+- **Data Validation**: Rules enforce proper data structure and prevent malformed entries
 
 ### Network Security
-- HTTPS communication between all components
-- Firebase security rules enforce user-scoped access
-- Forge platform provides sandboxed execution environment
+- **HTTPS Only**: All communication encrypted in transit
+- **Firebase Security Rules**: Comprehensive access control and data validation
+- **Forge Sandbox**: Serverless execution environment with built-in security controls
+- **Service Account Security**: Limited-scope Firebase admin credentials
 
 ## Scalability Considerations
 
@@ -174,6 +197,12 @@ forge install  # Install to development site
 npm run lint  # ESLint validation
 ```
 
+### Security Setup
+Refer to `FIREBASE_SECURITY_SETUP.md` for detailed instructions on:
+- Applying Firebase security rules
+- Configuring authentication for external processes
+- Testing security rule enforcement
+
 ## Configuration Management
 
 ### Forge Configuration (`manifest.yml`)
@@ -182,9 +211,10 @@ npm run lint  # ESLint validation
 - Resource declarations
 
 ### Firebase Configuration
-- Service account credentials
-- Database security rules
-- Regional deployment settings
+- **Service Account**: Admin SDK credentials for secure database access
+- **Security Rules**: Production and simplified rule configurations
+- **Regional Deployment**: Europe-West1 region for GDPR compliance
+- **Authentication**: Support for admin service accounts and external process authentication
 
 ## Future Enhancements
 
@@ -201,6 +231,7 @@ npm run lint  # ESLint validation
 2. **Error Monitoring**: Limited error tracking and alerting
 3. **Documentation**: API documentation for external integrations
 4. **Performance Monitoring**: Response time and throughput metrics
+5. **Security Audit**: Regular review of Firebase security rules and access patterns
 
 ## Dependencies
 
