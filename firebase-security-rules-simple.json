@@ -1,0 +1,24 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    
+    "messages": {
+      "$userId": {
+        "$commandId": {
+          ".read": "auth != null",
+          ".write": "auth != null",
+          ".validate": "newData.hasChildren(['type', 'payload', 'timestamp', 'from']) && newData.child('type').val() == 'code-request' && newData.child('from').val() == 'jira-forge-app'"
+        }
+      }
+    },
+    
+    "responses": {
+      "$responseKey": {
+        ".read": "auth != null",
+        ".write": "auth != null",
+        ".validate": "newData.hasChildren(['response', 'messageId', 'timestamp']) && newData.child('response').isString() && newData.child('messageId').isString()"
+      }
+    }
+  }
+}

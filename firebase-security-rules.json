@@ -1,0 +1,57 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    
+    "messages": {
+      "$userId": {
+        "$commandId": {
+          ".read": "auth != null && (auth.uid == $userId || auth.token.admin == true)",
+          ".write": "auth != null && (auth.uid == $userId || auth.token.admin == true)",
+          ".validate": "newData.hasChildren(['type', 'payload', 'timestamp', 'from'])",
+          "type": {
+            ".validate": "newData.isString() && newData.val() == 'code-request'"
+          },
+          "payload": {
+            ".validate": "newData.hasChildren(['description'])",
+            "description": {
+              ".validate": "newData.isString() && newData.val().length > 0"
+            },
+            "issueId": {
+              ".validate": "newData.isString()"
+            },
+            "message": {
+              ".validate": "newData.isString()"
+            }
+          },
+          "timestamp": {
+            ".validate": "newData.isString()"
+          },
+          "from": {
+            ".validate": "newData.isString() && newData.val() == 'jira-forge-app'"
+          }
+        }
+      }
+    },
+    
+    "responses": {
+      "$responseKey": {
+        ".read": "auth != null && auth.token.admin == true",
+        ".write": "auth != null",
+        ".validate": "newData.hasChildren(['response', 'messageId', 'timestamp'])",
+        "response": {
+          ".validate": "newData.isString() && newData.val().length > 0"
+        },
+        "messageId": {
+          ".validate": "newData.isString()"
+        },
+        "timestamp": {
+          ".validate": "newData.isString()"
+        },
+        "message": {
+          ".validate": "newData.isString()"
+        }
+      }
+    }
+  }
+}
