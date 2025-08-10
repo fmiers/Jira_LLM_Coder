@@ -1,13 +1,16 @@
-import Resolver from '@forge/resolver';
-import api, { route } from '@forge/api';
-import admin from 'firebase-admin';
-import serviceAccount from './firebase-key.json';
+const Resolver = require('@forge/resolver');
+const api = require('@forge/api');
+const { route } = require('@forge/api');
+const { storage } = require('@forge/api');
+const admin = require('firebase-admin');
+const serviceAccount = require('./firebase-key.json');
 
-// Initialize Firebase Admin SDK
+// Initialize Firebase Admin SDK with cached access token
+let cachedAccessToken = null;
+let tokenExpiry = null;
+
 if (!admin.apps.length) {
   console.log('Initializing Firebase Admin SDK...');
-  console.log('Service account project_id:', serviceAccount.project_id);
-  console.log('Service account client_email:', serviceAccount.client_email);
   
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
@@ -17,12 +20,674 @@ if (!admin.apps.length) {
   console.log('Firebase Admin SDK initialized successfully');
 }
 
-const db = admin.database();
-const resolver = new Resolver();
+// Function to get cached or fresh access token
+async function getAccessToken() {
+  const now = Date.now();
+  
+  // If token exists and hasn't expired (with 5min buffer), use cached version
+  if (cachedAccessToken && tokenExpiry && now < (tokenExpiry - 300000)) {
+    return cachedAccessToken;
+  }
+  
+  // Get fresh token
+  const tokenResult = await admin.credential.cert(serviceAccount).getAccessToken();
+  cachedAccessToken = tokenResult.access_token;
+  tokenExpiry = now + (tokenResult.expires_in * 1000); // Convert to milliseconds
+  
+  return cachedAccessToken;
+}
+
+// Create resolver instance
+const resolver = new Resolver.default();
 
 resolver.define('getText', (req) => {
   console.log(req);
   return 'Code this item';
+});
+
+// Configuration management resolvers
+resolver.define('getCurrentProjectName', async (req) => {
+  const { context } = req;
+  
+  try {
+    // Get project information from Jira API
+    const projectKey = context.extension?.project?.key;
+    
+    if (projectKey) {
+      const response = await api.asApp().requestJira(route`/rest/api/3/project/${projectKey}`);
+      const project = await response.json();
+      return project.name || projectKey;
+    }
+    
+    return 'Unknown Project';
+  } catch (error) {
+    console.error('Error fetching project name:', error);
+    return 'Error loading project';
+  }
+});
+
+resolver.define('getCurrentProjectKey', async (req) => {
+  const { context } = req;
+  
+  try {
+    // Get project key from context
+    const projectKey = context.extension?.project?.key;
+    return projectKey || null;
+  } catch (error) {
+    console.error('Error getting project key:', error);
+    return null;
+  }
+});
+
+resolver.define('getBoardId', async (req) => {
+  const { projectKey } = req.payload;
+  
+  try {
+    // Get all boards for the project
+    const response = await api.asApp().requestJira(route`/rest/agile/1.0/board?projectKeyOrId=${projectKey}`);
+    const boardsData = await response.json();
+    
+    console.log('Boards response:', JSON.stringify(boardsData, null, 2));
+    
+    if (boardsData.values && boardsData.values.length > 0) {
+      // Return the first board ID (usually the main board)
+      const boardId = boardsData.values[0].id;
+      console.log('Found board ID:', boardId);
+      return boardId;
+    } else {
+      console.log('No boards found for project:', projectKey);
+      return null;
+    }
+  } catch (error) {
+    console.error('Error getting board ID:', error);
+    return null;
+  }
+});
+
+resolver.define('getConfiguration', async (req) => {
+  const { context } = req;
+  
+  try {
+    // Get configuration from Jira app storage
+    const projectKey = context.extension?.project?.key || 'default';
+    const config = await storage.get(`config_${projectKey}`);
+    
+    return config || {
+      projectName: '',
+      technicalDesignDoc: '',
+      projectTechnology: 'Jira app / VSCode extension'
+    };
+  } catch (error) {
+    console.error('Error loading configuration:', error);
+    return null;
+  }
+});
+
+resolver.define('saveConfiguration', async (req) => {
+  const { config } = req.payload;
+  const { context } = req;
+  
+  try {
+    // Save configuration to Jira app storage
+    const projectKey = context.extension?.project?.key || 'default';
+    await storage.set(`config_${projectKey}`, config);
+    
+    console.log('Configuration saved for project:', projectKey, config);
+    return { success: true };
+  } catch (error) {
+    console.error('Error saving configuration:', error);
+    throw new Error('Failed to save configuration');
+  }
+});
+
+resolver.define('saveTechnicalDesignDoc', async (req) => {
+  const { technicalDesignDoc } = req.payload;
+  const { context } = req;
+  
+  try {
+    // Get current configuration
+    const projectKey = context.extension?.project?.key || 'default';
+    const currentConfig = await storage.get(`config_${projectKey}`) || {};
+    
+    // Update only the technicalDesignDoc field
+    const updatedConfig = {
+      ...currentConfig,
+      technicalDesignDoc: technicalDesignDoc
+    };
+    
+    // Save back to storage
+    await storage.set(`config_${projectKey}`, updatedConfig);
+    
+    console.log('Technical Design Document saved for project:', projectKey, technicalDesignDoc);
+    return { success: true };
+  } catch (error) {
+    console.error('Error saving technical design document:', error);
+    throw new Error('Failed to save technical design document');
+  }
+});
+
+resolver.define('fetchConfluenceContent', async (req) => {
+  const { confluenceUrl } = req.payload;
+  
+  try {
+    // Extract page ID from Confluence URL
+    // Expected format: https://domain.atlassian.net/wiki/spaces/SPACE/pages/PAGE_ID/Page+Title
+    const urlMatch = confluenceUrl.match(/\/pages\/(\d+)\//);
+    if (!urlMatch) {
+      throw new Error('Invalid Confluence URL format. Expected format: .../pages/PAGE_ID/...');
+    }
+    
+    const pageId = urlMatch[1];
+    console.log('Fetching Confluence page ID:', pageId);
+    
+    // Fetch page content from Confluence API
+    const response = await api.asUser().requestConfluence(route`/wiki/api/v2/pages/${pageId}?body-format=atlas_doc_format`);
+    
+    if (!response.ok) {
+      throw new Error(`Failed to fetch Confluence page: ${response.status} ${response.statusText}`);
+    }
+    
+    const pageData = await response.json();
+    console.log('Successfully fetched Confluence page:', pageData.title);
+    
+    return {
+      success: true,
+      title: pageData.title,
+      content: pageData.body?.atlas_doc_format?.value || 'No content available'
+    };
+    
+  } catch (error) {
+    console.error('Error fetching Confluence content:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+});
+
+resolver.define('createJiraWorkItems', async (req) => {
+  const { epicsData, projectKey } = req.payload;
+  const { context } = req;
+  
+  try {
+    console.log('=== Creating Jira Work Items ===');
+    console.log('Project key:', projectKey);
+    console.log('Epics to create:', epicsData.epics.length);
+    
+    const createdItems = [];
+    
+    // Get project ID from project key
+    console.log(`Fetching project details for key: ${projectKey}`);
+    const projectResponse = await api.asUser().requestJira(route`/rest/api/3/project/${projectKey}`);
+    if (!projectResponse.ok) {
+      const errorText = await projectResponse.text();
+      console.error(`Project fetch failed for key "${projectKey}":`, projectResponse.status, errorText);
+      throw new Error(`Failed to fetch project details: ${projectResponse.status}`);
+    }
+    const project = await projectResponse.json();
+    const projectId = project.id;
+    console.log(`✓ Found project: "${project.name}" (${project.key}) with ID: ${projectId}`);
+    
+    // Create each epic and its stories
+    for (const epicData of epicsData.epics) {
+      console.log('Creating epic:', epicData.title);
+      
+      // Create Epic
+      const epicPayload = {
+        fields: {
+          project: { id: projectId },
+          summary: epicData.title,
+          description: {
+            type: "doc",
+            version: 1,
+            content: [
+              {
+                type: "paragraph",
+                content: [
+                  {
+                    type: "text",
+                    text: epicData.description || "Generated from technical design document"
+                  }
+                ]
+              }
+            ]
+          },
+          issuetype: { name: "Epic" }
+        }
+      };
+      
+      const epicResponse = await api.asUser().requestJira(route`/rest/api/3/issue`, {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(epicPayload)
+      });
+      
+      if (!epicResponse.ok) {
+        const errorText = await epicResponse.text();
+        console.error('Epic creation failed:', errorText);
+        throw new Error(`Failed to create epic "${epicData.title}": ${epicResponse.status}`);
+      }
+      
+      const createdEpic = await epicResponse.json();
+      console.log('✓ Created epic:', createdEpic.key);
+      
+      const epicItem = {
+        type: 'epic',
+        key: createdEpic.key,
+        id: createdEpic.id,
+        title: epicData.title,
+        stories: []
+      };
+      
+      // Create stories for this epic
+      if (epicData.stories && epicData.stories.length > 0) {
+        for (const storyData of epicData.stories) {
+          console.log('Creating story:', storyData.title);
+          
+          // Build description with acceptance criteria
+          let storyDescription = storyData.description || "Generated from technical design document";
+          if (storyData.acceptanceCriteria && storyData.acceptanceCriteria.length > 0) {
+            storyDescription += "\n\nAcceptance Criteria:\n" + 
+              storyData.acceptanceCriteria.map(criteria => `• ${criteria}`).join('\n');
+          }
+          
+          const storyPayload = {
+            fields: {
+              project: { id: projectId },
+              summary: storyData.title,
+              description: {
+                type: "doc",
+                version: 1,
+                content: [
+                  {
+                    type: "paragraph",
+                    content: [
+                      {
+                        type: "text",
+                        text: storyDescription
+                      }
+                    ]
+                  }
+                ]
+              },
+              issuetype: { name: "Story" },
+              parent: { key: createdEpic.key } // Link to epic
+            }
+          };
+          
+          const storyResponse = await api.asUser().requestJira(route`/rest/api/3/issue`, {
+            method: 'POST',
+            headers: {
+              'Accept': 'application/json',
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(storyPayload)
+          });
+          
+          if (!storyResponse.ok) {
+            const errorText = await storyResponse.text();
+            console.error('Story creation failed:', errorText);
+            // Continue with other stories rather than failing completely
+            console.log(`⚠ Failed to create story "${storyData.title}": ${storyResponse.status}`);
+          } else {
+            const createdStory = await storyResponse.json();
+            console.log('✓ Created story:', createdStory.key);
+            
+            epicItem.stories.push({
+              key: createdStory.key,
+              id: createdStory.id,
+              title: storyData.title
+            });
+          }
+        }
+      }
+      
+      createdItems.push(epicItem);
+    }
+    
+    console.log('=== Work Item Creation Complete ===');
+    console.log('Created epics:', createdItems.length);
+    console.log('Total stories:', createdItems.reduce((sum, epic) => sum + epic.stories.length, 0));
+    
+    return {
+      success: true,
+      createdItems: createdItems,
+      summary: {
+        epics: createdItems.length,
+        stories: createdItems.reduce((sum, epic) => sum + epic.stories.length, 0)
+      }
+    };
+    
+  } catch (error) {
+    console.error('Error creating Jira work items:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+});
+
+resolver.define('checkForConversionResults', async (req) => {
+  const { commandId, projectKey } = req.payload;
+  const { context } = req;
+  
+  try {
+    console.log('=== Checking for Delayed Conversion Results ===');
+    console.log('Command ID:', commandId);
+    
+    const userId = context.accountId || 'anonymous';
+    const accessToken = await getAccessToken();
+    
+    // Check Firebase responses for the specific command
+    const responseUrl = `https://skipperrelay-default-rtdb.europe-west1.firebasedatabase.app/responses.json`;
+    
+    const responseCheck = await fetch(responseUrl, {
+      method: 'GET',
+      headers: { 
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json' 
+      }
+    });
+    
+    if (responseCheck.ok) {
+      const responseData = await responseCheck.json();
+      
+      if (responseData && typeof responseData === 'object') {
+        const keys = Object.keys(responseData);
+        
+        for (const key of keys) {
+          const childData = responseData[key];
+          
+          if (childData && childData.response && childData.messageId === userId) {
+            if (childData.message && childData.message.includes(commandId)) {
+              console.log('Found delayed response!');
+              
+              try {
+                const jsonMatch = childData.response.match(/\{[\s\S]*\}/);
+                if (jsonMatch) {
+                  const epicsData = JSON.parse(jsonMatch[0]);
+                  
+                  // Clean up Firebase entry
+                  await fetch(`https://skipperrelay-default-rtdb.europe-west1.firebasedatabase.app/responses/${key}.json`, { 
+                    method: 'DELETE',
+                    headers: { 'Authorization': `Bearer ${accessToken}` }
+                  });
+                  
+                  return {
+                    success: true,
+                    data: epicsData
+                  };
+                }
+              } catch (parseError) {
+                console.error('Error parsing delayed response:', parseError);
+              }
+            }
+          }
+        }
+      }
+    }
+    
+    return {
+      success: false,
+      message: 'No results available yet'
+    };
+    
+  } catch (error) {
+    console.error('Error checking for conversion results:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+});
+
+resolver.define('checkProgressAndResults', async (req) => {
+  const { commandId, userId } = req.payload;
+  const { context } = req;
+  
+  try {
+    console.log('=== Checking Progress and Results ===');
+    console.log('CommandId:', commandId);
+    console.log('UserId:', userId);
+    
+    const accessToken = await getAccessToken();
+    
+    // URLs for checking progress and responses
+    const encodedUserId = encodeURIComponent(userId);
+    const progressUrl = `https://skipperrelay-default-rtdb.europe-west1.firebasedatabase.app/progress/${encodedUserId}/${commandId}.json`;
+    const responseUrl = `https://skipperrelay-default-rtdb.europe-west1.firebasedatabase.app/responses.json`;
+    
+    // First check for final response
+    console.log('Checking for final response...');
+    try {
+      const responseCheck = await fetch(responseUrl, {
+        method: 'GET',
+        headers: { 
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json' 
+        }
+      });
+      
+      if (responseCheck.ok) {
+        const responseData = await responseCheck.json();
+        
+        if (responseData && typeof responseData === 'object') {
+          const keys = Object.keys(responseData);
+          
+          for (const key of keys) {
+            const childData = responseData[key];
+            
+            if (childData && childData.response && childData.userId === userId) {
+              if (childData.messageId === commandId) {
+                console.log('✓ Found final response!');
+                
+                try {
+                  // Extract JSON from response
+                  const jsonMatch = childData.response.match(/\{[\s\S]*\}/);
+                  if (jsonMatch) {
+                    const epicsData = JSON.parse(jsonMatch[0]);
+                    
+                    // Clean up Firebase entries
+                    try {
+                      const deleteMessage = fetch(`https://skipperrelay-default-rtdb.europe-west1.firebasedatabase.app/messages/${userId}/${commandId}.json`, { 
+                        method: 'DELETE',
+                        headers: { 'Authorization': `Bearer ${accessToken}` }
+                      });
+                      const deleteResponseEntry = fetch(`https://skipperrelay-default-rtdb.europe-west1.firebasedatabase.app/responses/${key}.json`, { 
+                        method: 'DELETE',
+                        headers: { 'Authorization': `Bearer ${accessToken}` }
+                      });
+                      const deleteProgress = fetch(`https://skipperrelay-default-rtdb.europe-west1.firebasedatabase.app/progress/${encodedUserId}/${commandId}.json`, { 
+                        method: 'DELETE',
+                        headers: { 'Authorization': `Bearer ${accessToken}` }
+                      });
+                      
+                      await Promise.all([deleteMessage, deleteResponseEntry, deleteProgress]);
+                      console.log('✓ Firebase entries cleaned up');
+                    } catch (cleanupError) {
+                      console.error('Error cleaning up Firebase entries:', cleanupError);
+                    }
+                    
+                    return {
+                      success: true,
+                      completed: true,
+                      data: epicsData
+                    };
+                  }
+                } catch (parseError) {
+                  console.error('Error parsing Claude response:', parseError);
+                  return {
+                    success: false,
+                    error: 'Failed to parse Claude response as JSON',
+                    rawResponse: childData.response
+                  };
+                }
+              }
+            }
+          }
+        }
+      }
+    } catch (responseError) {
+      console.log('Error checking responses:', responseError.message);
+    }
+    
+    // No final response yet, check for progress
+    console.log('Checking for progress updates...');
+    try {
+      const progressCheck = await fetch(progressUrl, {
+        method: 'GET',
+        headers: { 
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json' 
+        }
+      });
+      
+      if (progressCheck.ok) {
+        const progressData = await progressCheck.json();
+        
+        if (progressData && progressData.status) {
+          console.log('Progress found:', progressData.status);
+          
+          return {
+            success: true,
+            processing: true,
+            progress: {
+              status: progressData.status,
+              message: progressData.message || progressData.status,
+              timestamp: progressData.timestamp
+            }
+          };
+        }
+      }
+    } catch (progressError) {
+      console.log('Error checking progress:', progressError.message);
+    }
+    
+    // No progress or response found
+    return {
+      success: true,
+      processing: true,
+      progress: {
+        status: 'waiting',
+        message: 'Waiting for Claude to start processing...',
+        timestamp: new Date().toISOString()
+      }
+    };
+    
+  } catch (error) {
+    console.error('Error in checkProgressAndResults:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+});
+
+resolver.define('convertToEpicsAndStories', async (req) => {
+  const { confluenceContent, projectKey } = req.payload;
+  const { context } = req;
+  
+  try {
+    console.log('=== Converting Confluence Content to Epics and Stories ===');
+    
+    // Create unique identifiers for Claude communication
+    const userId = context.accountId || 'anonymous';
+    const commandId = `epics-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
+    
+    // Prepare content for Claude with specific instructions
+    const claudePrompt = `Please analyze the following technical design document and convert it into Jira Epics and User Stories. 
+
+IMPORTANT: Respond ONLY with valid JSON in this exact format:
+{
+  "epics": [
+    {
+      "title": "Epic Title",
+      "description": "Epic description",
+      "stories": [
+        {
+          "title": "Story Title", 
+          "description": "As a [user], I want [functionality] so that [benefit]",
+          "acceptanceCriteria": ["Criteria 1", "Criteria 2"]
+        }
+      ]
+    }
+  ]
+}
+
+Technical Design Document Content:
+${confluenceContent}`;
+
+    // Send command to Firebase using existing infrastructure
+    const commandData = {
+      type: 'epics-conversion',
+      payload: {
+        prompt: claudePrompt,
+        projectKey: projectKey,
+        message: 'Convert technical design to epics and stories'
+      },
+      timestamp: new Date().toISOString(),
+      from: 'jira-forge-app'
+    };
+    
+    // Get cached or fresh access token for authentication
+    const accessToken = await getAccessToken();
+    
+    const firebaseUrl = `https://skipperrelay-default-rtdb.europe-west1.firebasedatabase.app/messages/${userId}/${commandId}.json`;
+    
+    console.log('=== Firebase Connection Test ===');
+    console.log('Sending epics conversion request to Firebase:', firebaseUrl);
+    console.log('Access token available:', !!accessToken);
+    console.log('Command data prepared:', JSON.stringify(commandData, null, 2));
+    
+    // Send request to Firebase
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+    
+    let response;
+    try {
+      response = await fetch(firebaseUrl, {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(commandData),
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Firebase write failed: ${response.status} ${response.statusText} - ${errorText}`);
+      }
+      
+      console.log('✓ Firebase write successful for epics conversion');
+      
+      // Return immediately - don't wait for Claude response
+      return {
+        success: true,
+        processing: true,
+        commandId: commandId,
+        userId: userId,
+        message: 'Conversion request sent to Claude. Use checkProgressAndResults to poll for updates.'
+      };
+      
+    } catch (error) {
+      clearTimeout(timeoutId);
+      throw error;
+    }
+    
+  } catch (error) {
+    console.error('Error in convertToEpicsAndStories:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
 });
 
 resolver.define('getIssueDescription', async (req) => {
@@ -87,7 +752,7 @@ resolver.define('sendToClaude', async (req) => {
     const userId = context.accountId || 'anonymous';
     const commandId = `cmd-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
     
-    // Send command to Firebase using REST API instead of Admin SDK
+    // Send command to Firebase using authenticated REST API
     const commandData = {
       type: 'code-request',
       payload: {
@@ -99,36 +764,53 @@ resolver.define('sendToClaude', async (req) => {
       from: 'jira-forge-app'
     };
     
+    // Get cached or fresh access token for authentication
+    const accessToken = await getAccessToken();
+    
     const firebaseUrl = `https://skipperrelay-default-rtdb.europe-west1.firebasedatabase.app/messages/${userId}/${commandId}.json`;
     
-    console.log('Firebase URL:', firebaseUrl);
-    console.log('Command data:', JSON.stringify(commandData, null, 2));
+    console.log('Sending to Firebase:', firebaseUrl);
     
-    // Use Forge fetch API instead of Firebase Admin SDK
-    const response = await fetch(firebaseUrl, {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(commandData)
-    });
+    // Use authenticated REST API call with timeout
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout for Firebase write
     
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    let response;
+    try {
+      response = await fetch(firebaseUrl, {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(commandData),
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Firebase write failed: ${response.status} ${response.statusText} - ${errorText}`);
+      }
+      
+      const result = await response.json();
+      console.log('✓ Firebase write successful');
+      
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (error.name === 'AbortError') {
+        throw new Error('Firebase write timeout - check Firebase connection');
+      }
+      throw error;
     }
     
-    const result = await response.json();
-    console.log('✓ Successfully wrote to Firebase via REST API');
-    console.log('Firebase response:', result);
-    
-    // Now poll for response from Claude
-    console.log('Polling for response...');
-    console.log('Looking for response with messageId:', userId);
-    console.log('Looking for response with commandId:', commandId);
+    // Now poll for response from Claude using authenticated REST API
+    console.log(`Polling for response (${userId}/${commandId})...`);
     const responseUrl = `https://skipperrelay-default-rtdb.europe-west1.firebasedatabase.app/responses.json`;
     
     let attempts = 0;
-    const maxAttempts = 20; // 20 seconds timeout (under Forge's 25s limit)
+    const maxAttempts = 20; // 20 seconds timeout (still under Forge's 25s limit)
     const pollInterval = 1000; // 1 second intervals
     
     while (attempts < maxAttempts) {
@@ -139,11 +821,21 @@ resolver.define('sendToClaude', async (req) => {
       
       try {
         console.log(`Fetching: ${responseUrl}`);
+        
+        // Add timeout to polling requests too
+        const pollController = new AbortController();
+        const pollTimeoutId = setTimeout(() => pollController.abort(), 5000); // 5 second timeout for each poll
+        
         const responseCheck = await fetch(responseUrl, {
           method: 'GET',
-          headers: { 'Content-Type': 'application/json' }
+          headers: { 
+            'Authorization': `Bearer ${accessToken}`,
+            'Content-Type': 'application/json' 
+          },
+          signal: pollController.signal
         });
         
+        clearTimeout(pollTimeoutId);
         console.log(`Response status: ${responseCheck.status}`);
         
         if (responseCheck.ok) {
@@ -327,10 +1019,16 @@ resolver.define('sendToClaude', async (req) => {
                 console.error('Error updating Jira issue:', jiraError);
               }
               
-              // Clean up Firebase entries
+              // Clean up Firebase entries using authenticated REST API
               try {
-                const deleteMessage = fetch(`https://skipperrelay-default-rtdb.europe-west1.firebasedatabase.app/messages/${userId}/${commandId}.json`, { method: 'DELETE' });
-                const deleteResponseEntry = fetch(`https://skipperrelay-default-rtdb.europe-west1.firebasedatabase.app/responses/${bestMatch.key}.json`, { method: 'DELETE' });
+                const deleteMessage = fetch(`https://skipperrelay-default-rtdb.europe-west1.firebasedatabase.app/messages/${userId}/${commandId}.json`, { 
+                  method: 'DELETE',
+                  headers: { 'Authorization': `Bearer ${accessToken}` }
+                });
+                const deleteResponseEntry = fetch(`https://skipperrelay-default-rtdb.europe-west1.firebasedatabase.app/responses/${bestMatch.key}.json`, { 
+                  method: 'DELETE',
+                  headers: { 'Authorization': `Bearer ${accessToken}` }
+                });
                 
                 await Promise.all([deleteMessage, deleteResponseEntry]);
                 console.log('✓ Firebase entries cleaned up');
@@ -353,20 +1051,34 @@ resolver.define('sendToClaude', async (req) => {
           console.log('Error response body:', errorText);
         }
       } catch (pollError) {
-        console.error('Error during response polling:', pollError);
-        console.error('Poll error stack:', pollError.stack);
+        console.error(`Poll attempt ${attempts}/${maxAttempts} failed:`, pollError.message);
+        console.error('Poll error type:', pollError.name);
+        
+        if (pollError.name === 'AbortError') {
+          console.error('Individual poll request timed out (5 seconds), continuing to next attempt...');
+        } else {
+          console.error('Poll error stack:', pollError.stack);
+        }
+        
+        // Continue polling unless it's a critical error
+        if (pollError.message && pollError.message.includes('fetch')) {
+          console.error('Network error detected, continuing polling...');
+        }
       }
     }
     
     // Timeout reached - clean up message but don't delete response in case it arrives late
     console.log('Timeout reached, cleaning up message...');
     try {
-      await fetch(`https://skipperrelay-default-rtdb.europe-west1.firebasedatabase.app/messages/${userId}/${commandId}.json`, { method: 'DELETE' });
+      await fetch(`https://skipperrelay-default-rtdb.europe-west1.firebasedatabase.app/messages/${userId}/${commandId}.json`, { 
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${accessToken}` }
+      });
     } catch (cleanupError) {
       console.error('Error cleaning up message on timeout:', cleanupError);
     }
     
-    return `TIMEOUT: Message sent successfully but no response received after 20 seconds. Check Firebase at /responses/${userId}/${commandId}`;
+    return `TIMEOUT: Message sent successfully but no response received after ${maxAttempts} seconds. Check Firebase at /responses/ for responses. CommandId: ${commandId}, UserId: ${userId}`;
     
   } catch (error) {
     console.error('=== Firebase REST API Error Details ===');
@@ -385,4 +1097,4 @@ resolver.define('sendToClaude', async (req) => {
   }
 });
 
-export const handler = resolver.getDefinitions();
+module.exports = { handler: resolver.getDefinitions() };

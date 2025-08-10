@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import ForgeReconciler, { Text, Button, TextArea } from '@forge/react';
+import ForgeReconciler, { Text, Button, TextArea, Box } from '@forge/react';
 import { invoke } from '@forge/bridge';
 import { view } from '@forge/bridge';
 
@@ -41,6 +41,7 @@ const App = () => {
         console.log('Response received:', response);
         setStatusMessage(`Response: ${response}`);
         setIsSending(false);
+        
       })
       .catch(error => {
         console.error('Send error:', error);
@@ -66,6 +67,7 @@ const App = () => {
         rows={3}
         disabled={true}
       />
+      <Box paddingBlock="space.100" />
       <Button appearance="subtle" onClick={handleCancel} disabled={isLoading || isSending}>
         Cancel
       </Button>
