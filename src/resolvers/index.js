@@ -40,6 +40,7 @@ async function getAccessToken() {
 // Create resolver instance
 const resolver = new Resolver.default();
 
+
 resolver.define('getText', (req) => {
   console.log(req);
   return 'Code this item';

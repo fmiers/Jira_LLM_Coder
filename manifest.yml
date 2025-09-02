@@ -5,14 +5,14 @@ modules:
       resolver:
         function: resolver
       render: native
-      title: Code this item 113
+      title: Code this item 137
   jira:projectPage:
     - key: project-configuration-page
       resource: config
       resolver:
         function: resolver
       render: native
-      title: AI Coder 113
+      title: AI Coder 137
       icon: https://developer.atlassian.com/platform/forge/images/icons/settings.svg
   function:
     - key: resolver

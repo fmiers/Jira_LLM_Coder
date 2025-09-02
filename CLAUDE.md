@@ -74,3 +74,9 @@ npm run lint
 - Firebase serves as the communication bridge between Jira and external Claude instances
 - The app polls Firebase for responses with 10-second timeout
 - All Firebase entries are cleaned up after successful communication
+
+## Forge Platform Documentation
+
+**IMPORTANT**: Load all documentation files from the `/docs/forge` directory at the start of each session. This folder contains comprehensive Forge platform documentation including UI Kit components, Custom UI, Bridge API, design tokens, environments, runtime configuration, and best practices.
+
+These documents should be used as reference when working with Forge-specific features, components, and development patterns in this project.

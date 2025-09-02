@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import ForgeReconciler, { Text, TextArea, Button, Link, Box, DynamicTable } from '@forge/react';
+import ForgeReconciler, { Text, TextArea, Button, Link, Box, DynamicTable, Inline, InlineEdit, Textfield, Stack } from '@forge/react';
 import { invoke } from '@forge/bridge';
+import * as logic from './configLogic';
 
 const ConfigApp = () => {
   const [projectName, setProjectName] = useState('');
@@ -10,7 +11,6 @@ const ConfigApp = () => {
   const [isSaving, setIsSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState('');
   const [isEditingTechDoc, setIsEditingTechDoc] = useState(false);
-  const [tempTechDoc, setTempTechDoc] = useState('');
   const [epicsData, setEpicsData] = useState(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
@@ -25,21 +25,14 @@ const ConfigApp = () => {
     // Load current project name and existing configuration
     const loadConfiguration = async () => {
       setIsLoading(true);
-      try {
-        // Get current project name
-        const currentProjectName = await invoke('getCurrentProjectName');
-        setProjectName(currentProjectName || '');
-
-        // Load existing configuration
-        const config = await invoke('getConfiguration');
-        if (config) {
-          setTechnicalDesignDoc(config.technicalDesignDoc || '');
-          setTempTechDoc(config.technicalDesignDoc || '');
-          setProjectTechnology(config.projectTechnology || 'Jira app / VSCode extension');
-        }
-      } catch (error) {
-        console.error('Error loading configuration:', error);
-        setSaveMessage('Error loading configuration');
+      const result = await logic.loadConfiguration(invoke);
+      
+      if (result.success) {
+        setProjectName(result.projectName);
+        setTechnicalDesignDoc(result.config.technicalDesignDoc || '');
+        setProjectTechnology(result.config.projectTechnology || 'Jira app / VSCode extension');
+      } else {
+        setSaveMessage(result.error);
       }
       setIsLoading(false);
     };
@@ -47,61 +40,21 @@ const ConfigApp = () => {
     loadConfiguration();
   }, []);
 
-  const handleSave = async () => {
-    setIsSaving(true);
-    setSaveMessage('');
+
+  const handleConfirmTechDoc = async (value) => {
+    const result = await logic.saveTechnicalDesignDoc(invoke, value);
     
-    try {
-      const configData = {
-        projectName,
-        technicalDesignDoc,
-        projectTechnology
-      };
-
-      await invoke('saveConfiguration', { config: configData });
-      setSaveMessage('Configuration saved successfully!');
-    } catch (error) {
-      console.error('Error saving configuration:', error);
-      setSaveMessage('Error saving configuration');
-    }
-    
-    setIsSaving(false);
-  };
-
-  const handleReset = () => {
-    setTechnicalDesignDoc('');
-    setTempTechDoc('');
-    setProjectTechnology('Jira app / VSCode extension');
-    setSaveMessage('');
-    setIsEditingTechDoc(false);
-  };
-
-  const handleEditTechDoc = () => {
-    setTempTechDoc(technicalDesignDoc);
-    setIsEditingTechDoc(true);
-  };
-
-  const handleConfirmTechDoc = async () => {
-    try {
-      // Save to persistent storage
-      await invoke('saveTechnicalDesignDoc', { technicalDesignDoc: tempTechDoc });
-      
+    if (result.success) {
       // Update local state
-      setTechnicalDesignDoc(tempTechDoc);
+      setTechnicalDesignDoc(value);
       setIsEditingTechDoc(false);
       setSaveMessage('Technical Design Document saved successfully!');
       
       // Clear success message after 3 seconds
       setTimeout(() => setSaveMessage(''), 3000);
-    } catch (error) {
-      console.error('Error saving technical design document:', error);
-      setSaveMessage('Error saving technical design document');
+    } else {
+      setSaveMessage(result.error);
     }
-  };
-
-  const handleCancelTechDoc = () => {
-    setTempTechDoc(technicalDesignDoc);
-    setIsEditingTechDoc(false);
   };
 
   // Cleanup polling on unmount
@@ -119,97 +72,49 @@ const ConfigApp = () => {
     setIsProcessing(true);
     setSaveMessage('Checking for results...');
     
-    try {
-      const result = await invoke('checkProgressAndResults', { 
-        commandId: lastCommandId,
-        userId: lastUserId
-      });
-      
-      if (result.success && result.completed && result.data) {
-        setEpicsData(result.data);
-        setSaveMessage('Successfully retrieved Epics and Stories!');
-        setShowCheckAgain(false);
-        setIsProcessing(false);
-      } else if (result.success && result.processing) {
-        setSaveMessage(result.progress.message);
-        // Start polling if not already polling
-        if (!pollInterval) {
-          startPolling(lastCommandId, lastUserId);
-        }
-      } else {
-        setSaveMessage('Results not ready yet. Try again in a moment.');
-        setIsProcessing(false);
+    const result = await logic.checkForResults(invoke, lastCommandId, lastUserId);
+    
+    if (result.success && result.completed && result.data) {
+      setEpicsData(result.data);
+      setSaveMessage('Successfully retrieved Epics and Stories!');
+      setShowCheckAgain(false);
+      setIsProcessing(false);
+    } else if (result.success && result.processing) {
+      setSaveMessage(result.progress.message);
+      // Start polling if not already polling
+      if (!pollInterval) {
+        startPolling(lastCommandId, lastUserId);
       }
-    } catch (error) {
-      console.error('Error checking for results:', error);
-      setSaveMessage(`Error: ${error.message}`);
+    } else {
+      setSaveMessage(result.error || 'Results not ready yet. Try again in a moment.');
       setIsProcessing(false);
     }
   };
 
   const startPolling = (commandId, userId) => {
-    console.log('=== FRONTEND POLLING DEBUG ===');
-    console.log('Starting polling with:', { commandId, userId });
-    
     // Clear any existing polling
     if (pollInterval) {
-      console.log('Clearing existing polling interval');
       clearInterval(pollInterval);
     }
     
-    const interval = setInterval(async () => {
-      console.log('=== POLLING ITERATION ===');
-      console.log('Calling checkProgressAndResults...', { commandId, userId });
-      
-      try {
-        const result = await invoke('checkProgressAndResults', {
-          commandId: commandId,
-          userId: userId
-        });
-        
-        console.log('Polling result received:', JSON.stringify(result, null, 2));
-        
-        if (result.success) {
-          if (result.completed && result.data) {
-            // Final results received!
-            console.log('✓ CONVERSION COMPLETED!');
-            console.log('Setting epicsData:', result.data);
-            setEpicsData(result.data);
-            console.log('Setting success message');
-            setSaveMessage('Successfully converted to Epics and Stories!');
-            console.log('Setting isProcessing to false');
-            setIsProcessing(false);
-            console.log('Clearing polling interval');
-            clearInterval(interval);
-            setPollInterval(null);
-          } else if (result.processing && result.progress) {
-            // Progress update
-            console.log('✓ PROGRESS UPDATE RECEIVED');
-            console.log('Progress data:', result.progress);
-            console.log('Setting progress message:', result.progress.message);
-            setSaveMessage(result.progress.message);
-            console.log('Progress message set successfully');
-          } else {
-            console.log('⚠ Unexpected result structure:', result);
-          }
-        } else {
-          console.log('✗ POLLING ERROR:', result.error);
-          setSaveMessage(`Error: ${result.error}`);
-          setIsProcessing(false);
-          clearInterval(interval);
-          setPollInterval(null);
-        }
-      } catch (error) {
-        console.error('✗ POLLING EXCEPTION:', error);
-        setSaveMessage(`Polling error: ${error.message}`);
-        clearInterval(interval);
+    const interval = logic.startPolling(invoke, commandId, userId, {
+      onComplete: (data) => {
+        setEpicsData(data);
+        setSaveMessage('Successfully converted to Epics and Stories!');
+        setIsProcessing(false);
+        setPollInterval(null);
+      },
+      onProgress: (progress) => {
+        setSaveMessage(progress.message);
+      },
+      onError: (error) => {
+        setSaveMessage(`Error: ${error}`);
+        setIsProcessing(false);
         setPollInterval(null);
       }
-    }, 3000); // Poll every 3 seconds
+    });
     
-    console.log('Polling interval created:', interval);
     setPollInterval(interval);
-    console.log('Polling started successfully');
   };
 
   const handleConvertToEpics = async () => {
@@ -273,112 +178,7 @@ const ConfigApp = () => {
     }
   };
 
-  const countEpicsAndStories = () => {
-    if (!epicsData || !epicsData.epics) return { epics: 0, stories: 0 };
-    
-    const epics = epicsData.epics.length;
-    const stories = epicsData.epics.reduce((total, epic) => {
-      return total + (epic.stories ? epic.stories.length : 0);
-    }, 0);
-    
-    return { epics, stories };
-  };
 
-  // Transform epics data into DynamicTable format
-  const transformEpicsDataForTable = () => {
-    if (!epicsData || !epicsData.epics) return { head: null, rows: [] };
-    
-    const head = {
-      cells: [
-        {
-          key: 'epic',
-          content: 'Epic',
-          isSortable: true,
-          width: 20
-        },
-        {
-          key: 'story',
-          content: 'Story Title',
-          isSortable: true,
-          width: 30
-        },
-        {
-          key: 'description',
-          content: 'Description',
-          isSortable: false,
-          width: 35
-        },
-        {
-          key: 'criteria',
-          content: 'Acceptance Criteria',
-          isSortable: false,
-          width: 15
-        }
-      ]
-    };
-
-    const rows = [];
-    let rowIndex = 0;
-
-    epicsData.epics.forEach((epic) => {
-      if (epic.stories && epic.stories.length > 0) {
-        epic.stories.forEach((story, storyIndex) => {
-          const criteriaText = story.acceptanceCriteria && story.acceptanceCriteria.length > 0
-            ? story.acceptanceCriteria.join('; ')
-            : 'None specified';
-
-          rows.push({
-            key: `row-${rowIndex}`,
-            cells: [
-              {
-                key: `epic-${rowIndex}`,
-                content: storyIndex === 0 ? epic.title : '' // Only show epic name on first story
-              },
-              {
-                key: `story-${rowIndex}`,
-                content: story.title
-              },
-              {
-                key: `desc-${rowIndex}`,
-                content: story.description || 'No description'
-              },
-              {
-                key: `criteria-${rowIndex}`,
-                content: criteriaText
-              }
-            ]
-          });
-          rowIndex++;
-        });
-      } else {
-        // Epic with no stories
-        rows.push({
-          key: `row-${rowIndex}`,
-          cells: [
-            {
-              key: `epic-${rowIndex}`,
-              content: epic.title
-            },
-            {
-              key: `story-${rowIndex}`,
-              content: '(No stories defined)'
-            },
-            {
-              key: `desc-${rowIndex}`,
-              content: epic.description || 'No description'
-            },
-            {
-              key: `criteria-${rowIndex}`,
-              content: 'N/A'
-            }
-          ]
-        });
-        rowIndex++;
-      }
-    });
-
-    return { head, rows };
-  };
 
   const handleCreateWorkItems = async () => {
     setIsCreatingItems(true);
@@ -431,80 +231,73 @@ const ConfigApp = () => {
       
       <Text>Project Name: {projectName}</Text>
       
-      <Text>Technical Design Document</Text>
-      {isEditingTechDoc ? (
-        <Box>
-          <TextArea
-            value={tempTechDoc}
-            onChange={(e) => setTempTechDoc(e.target.value)}
-            placeholder="Enter URL or description of technical design document"
-            rows={3}
-            disabled={isSaving}
-          />
-          <Box paddingTop="space.100">
-            <Button 
-              appearance="primary" 
-              onClick={handleConfirmTechDoc}
-              disabled={isSaving}
-            >
-              ✓
-            </Button>
-            <Button 
-              appearance="subtle" 
-              onClick={handleCancelTechDoc}
-              disabled={isSaving}
-            >
-              ✗
-            </Button>
-          </Box>
-        </Box>
-      ) : (
-        <Box>
-          {technicalDesignDoc && technicalDesignDoc.startsWith('http') ? (
-            <Link href={technicalDesignDoc} target="_blank">
-              {technicalDesignDoc}
-            </Link>
-          ) : (
-            <Text>{technicalDesignDoc || "No technical design document"}</Text>
+      <Inline alignBlock="baseline" space="space.200">
+        <Text>Technical Design Document:</Text>
+        <InlineEdit
+          defaultValue={technicalDesignDoc}
+          isEditing={isEditingTechDoc}
+          editView={({ ...fieldProps }) => (
+            <Box xcss={{ width: '600px' }}>
+              <Textfield
+                {...fieldProps}
+                placeholder=""
+                autoFocus
+              />
+            </Box>
           )}
-          <Box paddingTop="space.100">
+          readView={() => (
+            <Inline space="space.075" alignBlock="center">
+              <Button
+                appearance="link"
+                onClick={() => setIsEditingTechDoc(true)}
+              >
+                Edit
+              </Button>
+              {technicalDesignDoc && technicalDesignDoc.startsWith('http') ? (
+                <Link href={technicalDesignDoc} target="_blank">
+                  {technicalDesignDoc}
+                </Link>
+              ) : (
+                <Text>{technicalDesignDoc || ""}</Text>
+              )}
+            </Inline>
+          )}
+          onConfirm={handleConfirmTechDoc}
+          onCancel={() => setIsEditingTechDoc(false)}
+        />
+      </Inline>
+
+      <Stack space="space.400">
+        <Text></Text>
+        <Box>
+          <Button 
+            appearance="primary"
+            onClick={handleConvertToEpics}
+            disabled={isProcessing || !technicalDesignDoc || !technicalDesignDoc.startsWith('http')}
+          >
+            {isProcessing ? 'Converting...' : 'Convert to Epics & Stories'}
+          </Button>
+        </Box>
+        {showCheckAgain && (
+          <Box>
             <Button 
-              appearance="link" 
-              onClick={handleEditTechDoc}
-              disabled={isSaving}
+              appearance="subtle"
+              onClick={handleCheckForResults}
+              disabled={isProcessing}
             >
-              Edit
+              Check Again for Results
             </Button>
           </Box>
-        </Box>
-      )}
-
-      <Box paddingTop="space.300">
-        <Button 
-          appearance="primary"
-          onClick={handleConvertToEpics}
-          disabled={isProcessing || !technicalDesignDoc || !technicalDesignDoc.startsWith('http')}
-        >
-          {isProcessing ? 'Converting...' : 'Convert to Epics & Stories'}
-        </Button>
-        {showCheckAgain && (
-          <Button 
-            appearance="subtle"
-            onClick={handleCheckForResults}
-            disabled={isProcessing}
-          >
-            Check Again for Results
-          </Button>
         )}
-      </Box>
-
-      <Box paddingTop="space.300">
         <Text>Generated Epics and Stories</Text>
+      </Stack>
+
+      <Box>
         {epicsData ? (
           <DynamicTable
             caption="Epics and User Stories"
-            head={transformEpicsDataForTable().head}
-            rows={transformEpicsDataForTable().rows}
+            head={logic.transformEpicsDataForTable(epicsData).head}
+            rows={logic.transformEpicsDataForTable(epicsData).rows}
             rowsPerPage={10}
             isLoading={false}
           />
@@ -527,7 +320,7 @@ const ConfigApp = () => {
 
       {showConfirmDialog && (
         <Box paddingTop="space.200">
-          <Text>You are about to create {countEpicsAndStories().epics} epics and {countEpicsAndStories().stories} user stories. Are you sure you want to proceed?</Text>
+          <Text>You are about to create {logic.countEpicsAndStories(epicsData).epics} epics and {logic.countEpicsAndStories(epicsData).stories} user stories. Are you sure you want to proceed?</Text>
           <Box paddingTop="space.100">
             <Button 
               appearance="primary"
@@ -562,34 +355,15 @@ const ConfigApp = () => {
         </Box>
       )}
       
-      <Text>Project Technology</Text>
-      <TextArea
-        value={projectTechnology}
-        onChange={(e) => setProjectTechnology(e.target.value)}
-        rows={2}
-        disabled={isSaving}
-      />
+      <Inline alignBlock="baseline" space="space.200">
+        <Text>Project Technology:</Text>
+        <Text>{projectTechnology}</Text>
+      </Inline>
 
       {saveMessage && (
         <Text>{saveMessage}</Text>
       )}
 
-      <Box paddingBlock="space.400" />
-      
-      <Button 
-        appearance="subtle" 
-        onClick={handleReset}
-        disabled={isSaving}
-      >
-        Reset
-      </Button>
-      <Button 
-        appearance="primary" 
-        onClick={handleSave}
-        disabled={isSaving}
-      >
-        {isSaving ? 'Saving...' : 'Save Configuration'}
-      </Button>
     </>
   );
 };
